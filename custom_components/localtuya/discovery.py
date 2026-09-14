@@ -62,11 +62,23 @@ class TuyaDiscovery(asyncio.DatagramProtocol):
         """Handle received broadcast message."""
         data = data[20:-8]
         try:
-            data = decrypt_udp(data)
-        except Exception:  # pylint: disable=broad-except
-            data = data.decode()
+            try:
+                data = decrypt_udp(data)
+            except Exception:  # pylint: disable=broad-except
+                data = data.decode()
+            decoded = json.loads(data)
+        except Exception as ex:  # pylint: disable=broad-except
+            # This is a persistent listener bound to the discovery UDP ports for the
+            # whole lifetime of the integration - any broadcast packet it can't decrypt
+            # or parse (e.g. from a device using a discovery format this integration
+            # doesn't support) must never be allowed to raise out of this callback.
+            # Previously only the decrypt step was guarded; the decode()/json.loads()
+            # fallback path was not, so an unparseable packet crashed straight through
+            # asyncio's read-ready callback - repeatedly, every time another such
+            # packet arrived, which is a real source of event-loop instability.
+            _LOGGER.debug("Discarding unparseable discovery broadcast from %s: %s", addr, ex)
+            return
 
-        decoded = json.loads(data)
         self.device_found(decoded)
 
     def device_found(self, device):
