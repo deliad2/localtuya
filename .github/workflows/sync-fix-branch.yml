@@ -1,0 +1,64 @@
+name: Merge upstream into fix branch
+
+# Keeps fix/control-ack-state-sync current with upstream releases. Runs after
+# the master-sync job so it merges the freshly-pulled upstream/master. Tries a
+# plain merge and pushes automatically when it's clean; when upstream touched
+# the same lines as the patch, it leaves the branch untouched and opens/updates
+# a tracking issue instead of guessing how to resolve the conflict.
+
+on:
+  workflow_run:
+    workflows: ["Sync master with upstream"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  FIX_BRANCH: fix/control-ack-state-sync
+  UPSTREAM_URL: https://github.com/rospogrigio/localtuya.git
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.FIX_BRANCH }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch latest master (already synced with upstream) and merge
+        id: merge
+        run: |
+          git fetch origin master
+          if git merge origin/master --no-edit; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push if merge was clean
+        if: steps.merge.outputs.clean == 'true'
+        run: git push origin "${{ env.FIX_BRANCH }}"
+
+      - name: Open/update an issue if there's a conflict to resolve by hand
+        if: steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TITLE="fix branch needs a manual rebase onto upstream"
+          BODY="Automatic merge of \`origin/master\` into \`${FIX_BRANCH}\` conflicted - upstream changed something the patch also touches (pytuya/__init__.py's exchange() ack handling). Rebase \`${FIX_BRANCH}\` onto \`master\` by hand and resolve the conflict."
+          EXISTING=$(gh issue list --search "in:title \"$TITLE\"" --state open --json number --jq '.[0].number')
+          if [ -z "$EXISTING" ]; then
+            gh issue create --title "$TITLE" --body "$BODY"
+          else
+            gh issue comment "$EXISTING" --body "Still conflicting as of $(date -u +%Y-%m-%d)."
+          fi
