@@ -779,6 +779,20 @@ class TuyaProtocol(asyncio.Protocol, ContextualLogger):
             return None
         payload = self._decode_payload(msg.payload)
 
+        # If the device's own acknowledgment carries dps data (this commonly happens
+        # for CONTROL acks), merge it into the cache and notify listeners right away.
+        # Without this, HA's cached state depends entirely on a separate, unsequenced
+        # unsolicited status push to learn the outcome of a command it just sent - if
+        # that push is delayed, dropped, or arrives out of order relative to a stale
+        # queued push, the entity can be left showing a state the device no longer has,
+        # even though the device fully confirmed the change here. Only ever applied
+        # when the ack itself actually contains dps data - never fabricated/assumed.
+        if isinstance(payload, dict) and "dps" in payload and payload["dps"]:
+            self.dps_cache.update(payload["dps"])
+            listener = self.listener and self.listener()
+            if listener is not None:
+                listener.status_updated(self.dps_cache)
+
         # Perform a new exchange (once) if we switched device type
         if dev_type != self.dev_type:
             self.debug(
